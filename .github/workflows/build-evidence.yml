@@ -21,9 +21,9 @@ jobs:
           $ev=Join-Path $env:RUNNER_TEMP 'smartdine-ci-evidence'
           New-Item -ItemType Directory -Force $ev | Out-Null
           'BOOTSTRAP-START' | Set-Content (Join-Path $ev 'bootstrap.txt')
-          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-evidence-portable-code.tar.gz')
+          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-evidence-launch-diag-code.tar.gz')
           if($archives.Count -ne 1){throw 'exactly one reviewed evidence archive required'}
-          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '794054ccbb287de2aee94d8b641366e1d7c76bdbf6af84d5fb76ec5bbbb990b2'){throw 'reviewed code archive hash mismatch'}
+          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '3cf3ca8342cdb2cf358516d80a1b648ab647fe0f5c5935112fe00fe4614c9cc7'){throw 'reviewed code archive hash mismatch'}
           if(Test-Path evidence){throw 'unexpected evidence directory'}
           tar -xzf $archives[0].Name
           if($LASTEXITCODE -ne 0){throw 'reviewed code extraction failed'}
