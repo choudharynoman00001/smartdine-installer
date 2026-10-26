@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: write
+  contents: read
 jobs:
   build:
     runs-on: windows-latest
@@ -176,9 +176,24 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $dir = "$env:LOCALAPPDATA\SmartDine"
-          Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -like '*server.mjs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-          # Only the synthetic CI install, after upgrade evidence has been captured.
-          Remove-Item $dir -Recurse -Force
+          # CI-only cleanup. Match this install's exact binary/script or exact
+          # hidden-server cmd redirection. Never kill unrelated node/cmd/browser.
+          $ownedNode = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -and $_.CommandLine.Contains("$dir\app\server.mjs") })
+          $ownedShell = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.ExecutablePath -eq "$env:SystemRoot\System32\cmd.exe" -and $_.CommandLine -and $_.CommandLine.Contains("$dir\app") -and $_.CommandLine.Contains("$dir\app\data\server.log") })
+          $evidence = Join-Path $env:RUNNER_TEMP 'smartdine-cleanup.txt'
+          "CI-owned node count=$($ownedNode.Count) shell count=$($ownedShell.Count)" | Tee-Object -FilePath $evidence
+          foreach ($p in @($ownedNode) + @($ownedShell)) {
+            "Stopping scoped process id=$($p.ProcessId) name=$($p.Name)" | Tee-Object -FilePath $evidence -Append
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+          # Only synthetic CI install, after upgrade and screenshot evidence.
+          # Retry only file-handle release, with finite total15s wait.
+          $removed = $false
+          for ($attempt=1; $attempt -le 3 -and -not $removed; $attempt++) {
+            try { Remove-Item $dir -Recurse -Force -ErrorAction Stop; $removed=$true }
+            catch { "Delete attempt=$attempt failed, waiting for scoped handle release" | Tee-Object -FilePath $evidence -Append; Start-Sleep -Seconds 5 }
+          }
+          if (-not $removed) { throw 'synthetic install removal still blocked; fresh install NOT tested' }
           Write-Host 'CANDIDATE-INSTALL-START'
           $install = Start-Process .\installer\SmartDinePOS-Setup.exe -ArgumentList '/S' -PassThru
           if (-not $install.WaitForExit(60000)) { throw 'candidate silent installer timed out' }
@@ -196,18 +211,13 @@ jobs:
           if (-not $a.token) { throw 'fresh candidate setup failed' }
           Write-Host 'FRESH-CANDIDATE-SETUP-OK'
       - name: Save build evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smartdine-installed-evidence
+          if-no-files-found: warn
           path: |
             installer/SmartDinePOS-Setup.exe
+            ${{ runner.temp }}/smartdine-cleanup.txt
             ${{ runner.temp }}/installed-desktop.jpg
             ${{ runner.temp }}/installed-mobile.jpg
-      - name: Upload release asset
-        if: success() && inputs.publish
-        shell: pwsh
-        run: |
-          $tag = "v1.0.0-run$env:GITHUB_RUN_NUMBER"
-          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Reviewed local POS and browser-engine app-window build. Real cloud deployment, physical device and printer checks are NOT certified. Shared-token sync is trusted-LAN only and not partition-safe single-writer. Unsigned installer: Windows SmartScreen MAY warn on first run. Only run this file if you downloaded it from this release page; then click 'More info' -> 'Run anyway'." --latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
