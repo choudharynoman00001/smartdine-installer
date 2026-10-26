@@ -1,6 +1,11 @@
 name: Build Windows installer
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish only after inspecting Windows evidence
+        type: boolean
+        default: false
 permissions:
   contents: write
 jobs:
@@ -8,6 +13,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Extract reviewed runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archives = @(Get-ChildItem -File -Filter '*smartdine-runtime.zip')
+          if ($archives.Count -ne 1) { throw 'exactly one reviewed runtime archive required' }
+          Remove-Item app,installer -Recurse -Force
+          Expand-Archive $archives[0].FullName -DestinationPath . -Force
+          if (-not (Test-Path app\sync.mjs)) { throw 'reviewed sync engine missing' }
       - name: Install NSIS (ephemeral, with retry)
         shell: pwsh
         run: |
@@ -43,7 +57,11 @@ jobs:
       - name: Smoke test - silent install, launch, API checks
         shell: pwsh
         run: |
-          .\installer\SmartDinePOS-Setup.exe /S
+          # Upgrade fixture: create real saved data with previously shipped v4/run5.
+          Invoke-WebRequest 'https://github.com/choudharynoman00001/smartdine-installer/releases/download/v1.0.0-run5/SmartDinePOS-Setup.exe' -OutFile previous-setup.exe
+          $expected = 'a705b77844e6b5f787fa9a6b8e991366bb42f2f75e04f879c0d8e01160996ab3'
+          if ((Get-FileHash previous-setup.exe -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw 'previous release hash mismatch' }
+          .\previous-setup.exe /S
           Start-Sleep 5
           $dir = "$env:LOCALAPPDATA\SmartDine"
           if (-not (Test-Path "$dir\node\node.exe")) { throw "install failed: node.exe missing" }
@@ -96,7 +114,25 @@ jobs:
           $oid = Get-Content "$dir\smoke-order.txt"
           if (-not ($orders.orders | Where-Object { $_.id -eq $oid })) { throw "readback failed: order lost after restart" }
           Write-Host "RESTART+READBACK OK"
-          Stop-Process -Id $proc2.Id -Force
+          if ($proc2 -and -not $proc2.HasExited) { Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue }
+      - name: Upgrade preservation and real app-window launcher proof
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "$env:LOCALAPPDATA\SmartDine"
+          $owned = Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -like '*server.mjs*' }
+          $owned | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          .\installer\SmartDinePOS-Setup.exe /S
+          Start-Sleep -Seconds 3
+          $env:SMARTDINE_NO_BROWSER = '1'
+          Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
+          $pin = (Get-Content "$dir\smoke-pin.txt" -Raw).Trim()
+          $login = Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/auth/login -ContentType 'application/json' -Body (@{pin=$pin} | ConvertTo-Json)
+          $orders = Invoke-RestMethod http://127.0.0.1:8080/api/orders -Headers @{authorization="Bearer $($login.token)"}
+          $oid = (Get-Content "$dir\smoke-order.txt" -Raw).Trim()
+          if (-not ($orders.orders | Where-Object id -eq $oid)) { throw 'upgrade lost existing order' }
+          Write-Host 'UPGRADE-PRESERVATION-OK'
+          & .\installer\appwindow-proof.ps1 -InstallDir $dir
       - name: Installed UI screenshots (headless Chrome against the installed app)
         if: success()
         shell: pwsh
@@ -107,14 +143,14 @@ jobs:
           $up = $false
           try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
           if (-not $up) {
-            $proc = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
+            $proc = Start-Process -PassThru "cscript.exe" -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
             for ($i = 0; $i -lt 30 -and -not $up; $i++) {
               Start-Sleep 1
               try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
             }
           }
           if (-not $up) { throw "installed app not reachable for screenshots" }
-          Write-Host "INSTALLED APP REACHABLE (launched via SmartDine.bat)"
+          Write-Host "INSTALLED APP REACHABLE (launched via shipped launcher.vbs)"
           Set-Location $env:RUNNER_TEMP
           npm init -y | Out-Null
           npm install puppeteer-core --no-fund --no-audit | Out-Null
@@ -128,11 +164,37 @@ jobs:
             Write-Host "SHOT_B64_END $f"
           }
           if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+      - name: Fresh candidate install verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "$env:LOCALAPPDATA\SmartDine"
+          Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -like '*server.mjs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          # Only the synthetic CI install, after upgrade evidence has been captured.
+          Remove-Item $dir -Recurse -Force
+          .\installer\SmartDinePOS-Setup.exe /S
+          Start-Sleep -Seconds 3
+          $env:SMARTDINE_NO_BROWSER='1'
+          Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
+          $s = Invoke-RestMethod http://127.0.0.1:8080/api/setup
+          if (-not $s.setup_required) { throw 'fresh candidate unexpectedly configured' }
+          $pin = -join ((1..8) | ForEach-Object { Get-Random -Minimum 0 -Maximum 10 })
+          $a = Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/setup -ContentType 'application/json' -Body (@{name='Candidate Owner';pin=$pin}|ConvertTo-Json)
+          if (-not $a.token) { throw 'fresh candidate setup failed' }
+          Write-Host 'FRESH-CANDIDATE-SETUP-OK'
+      - name: Save build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartdine-installed-evidence
+          path: |
+            installer/SmartDinePOS-Setup.exe
+            ${{ runner.temp }}/installed-desktop.jpg
+            ${{ runner.temp }}/installed-mobile.jpg
       - name: Upload release asset
-        if: success()
+        if: success() && inputs.publish
         shell: pwsh
         run: |
           $tag = "v1.0.0-run$env:GITHUB_RUN_NUMBER"
-          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen MAY warn on first run. Only run this file if you downloaded it from this release page; then click 'More info' -> 'Run anyway'." --latest
+          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Reviewed local POS and browser-engine app-window build. Real cloud deployment, physical device and printer checks are NOT certified. Shared-token sync is trusted-LAN only and not partition-safe single-writer. Unsigned installer: Windows SmartScreen MAY warn on first run. Only run this file if you downloaded it from this release page; then click 'More info' -> 'Run anyway'." --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
