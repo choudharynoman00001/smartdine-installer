@@ -104,13 +104,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = "$env:LOCALAPPDATA\SmartDine"
           $env:SMARTDINE_NO_BROWSER = "1"
-          $proc = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
           $up = $false
-          for ($i = 0; $i -lt 30 -and -not $up; $i++) {
-            Start-Sleep 1
-            try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+          try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+          if (-not $up) {
+            $proc = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
+            for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+              Start-Sleep 1
+              try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+            }
           }
-          if (-not $up) { throw "installed app did not start for screenshots" }
+          if (-not $up) { throw "installed app not reachable for screenshots" }
+          Write-Host "INSTALLED APP REACHABLE (launched via SmartDine.bat)"
           Set-Location $env:RUNNER_TEMP
           npm init -y | Out-Null
           npm install puppeteer-core --no-fund --no-audit | Out-Null
@@ -120,7 +124,7 @@ jobs:
           foreach ($f in 'installed-desktop.jpg','installed-mobile.jpg') {
             $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:RUNNER_TEMP\$f"))
             Write-Host "SHOT_B64_BEGIN $f"
-            Write-Host $b
+            for ($i = 0; $i -lt $b.Length; $i += 900) { Write-Host $b.Substring($i, [Math]::Min(900, $b.Length - $i)) }
             Write-Host "SHOT_B64_END $f"
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
