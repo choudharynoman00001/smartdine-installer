@@ -79,6 +79,7 @@ jobs:
           $order = Invoke-RestMethod -Method Post http://localhost:8080/api/orders -Headers $hdr -ContentType 'application/json' -Body (@{ order_type = "takeaway"; items = @(@{ menu_item_id = $mi.item.id; qty = 1 }) } | ConvertTo-Json -Depth 4)
           Write-Host "WRITE OK order=$($order.order.id)"
           $order.order.id | Out-File "$dir\smoke-order.txt"
+          $pin2 | Out-File "$dir\smoke-pin.txt"
           # stop + restart
           Stop-Process -Id $env:SMARTDINE_PID -Force
           Start-Sleep 2
@@ -96,11 +97,38 @@ jobs:
           if (-not ($orders.orders | Where-Object { $_.id -eq $oid })) { throw "readback failed: order lost after restart" }
           Write-Host "RESTART+READBACK OK"
           Stop-Process -Id $proc2.Id -Force
+      - name: Installed UI screenshots (headless Chrome against the installed app)
+        if: success()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "$env:LOCALAPPDATA\SmartDine"
+          $env:SMARTDINE_NO_BROWSER = "1"
+          $proc = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
+          $up = $false
+          for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+            Start-Sleep 1
+            try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+          }
+          if (-not $up) { throw "installed app did not start for screenshots" }
+          Set-Location $env:RUNNER_TEMP
+          npm init -y | Out-Null
+          npm install puppeteer-core --no-fund --no-audit | Out-Null
+          $env:SMOKE_PIN = (Get-Content "$dir\smoke-pin.txt" -Raw).Trim()
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\shot.cjs", [Convert]::FromBase64String("Y29uc3QgcHVwcGV0ZWVyID0gcmVxdWlyZSgncHVwcGV0ZWVyLWNvcmUnKTsKKGFzeW5jICgpID0+IHsKICBjb25zdCBjaHJvbWUgPSAnQzpcXFByb2dyYW0gRmlsZXNcXEdvb2dsZVxcQ2hyb21lXFxBcHBsaWNhdGlvblxcY2hyb21lLmV4ZSc7CiAgY29uc3QgYiA9IGF3YWl0IHB1cHBldGVlci5sYXVuY2goeyBleGVjdXRhYmxlUGF0aDogY2hyb21lLCBoZWFkbGVzczogJ25ldycsIGFyZ3M6IFsnLS1uby1zYW5kYm94J10gfSk7CiAgY29uc3QgcGcgPSBhd2FpdCBiLm5ld1BhZ2UoKTsKICBhd2FpdCBwZy5zZXRWaWV3cG9ydCh7IHdpZHRoOiAxMjgwLCBoZWlnaHQ6IDgwMCB9KTsKICBhd2FpdCBwZy5nb3RvKCdodHRwOi8vbG9jYWxob3N0OjgwODAvJywgeyB3YWl0VW50aWw6ICdkb21jb250ZW50bG9hZGVkJyB9KTsKICBjb25zdCBwaW4gPSBwcm9jZXNzLmVudi5TTU9LRV9QSU47CiAgYXdhaXQgcGcuZXZhbHVhdGUoYXN5bmMgKHBpbikgPT4gewogICAgY29uc3QgciA9IGF3YWl0IGZldGNoKCcvYXBpL2F1dGgvbG9naW4nLCB7IG1ldGhvZDogJ1BPU1QnLCBoZWFkZXJzOiB7ICdjb250ZW50LXR5cGUnOiAnYXBwbGljYXRpb24vanNvbicgfSwgYm9keTogSlNPTi5zdHJpbmdpZnkoeyBwaW4gfSkgfSk7CiAgICBjb25zdCBqID0gYXdhaXQgci5qc29uKCk7CiAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbSgnc2RfdG9rZW4nLCBqLnRva2VuKTsKICB9LCBwaW4pOwogIGF3YWl0IHBnLnJlbG9hZCh7IHdhaXRVbnRpbDogJ2RvbWNvbnRlbnRsb2FkZWQnIH0pOwogIGF3YWl0IG5ldyBQcm9taXNlKHIgPT4gc2V0VGltZW91dChyLCAyNTAwKSk7CiAgYXdhaXQgcGcuc2NyZWVuc2hvdCh7IHBhdGg6ICdpbnN0YWxsZWQtZGVza3RvcC5qcGcnLCB0eXBlOiAnanBlZycsIHF1YWxpdHk6IDcwIH0pOwogIGF3YWl0IHBnLnNldFZpZXdwb3J0KHsgd2lkdGg6IDM5MCwgaGVpZ2h0OiA4NDQgfSk7CiAgYXdhaXQgcGcucmVsb2FkKHsgd2FpdFVudGlsOiAnZG9tY29udGVudGxvYWRlZCcgfSk7CiAgYXdhaXQgbmV3IFByb21pc2UociA9PiBzZXRUaW1lb3V0KHIsIDI1MDApKTsKICBhd2FpdCBwZy5zY3JlZW5zaG90KHsgcGF0aDogJ2luc3RhbGxlZC1tb2JpbGUuanBnJywgdHlwZTogJ2pwZWcnLCBxdWFsaXR5OiA3MCB9KTsKICBhd2FpdCBiLmNsb3NlKCk7Cn0pKCkuY2F0Y2goZSA9PiB7IGNvbnNvbGUuZXJyb3IoZSk7IHByb2Nlc3MuZXhpdCgxKTsgfSk7Cg=="))
+          node shot.cjs
+          foreach ($f in 'installed-desktop.jpg','installed-mobile.jpg') {
+            $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:RUNNER_TEMP\$f"))
+            Write-Host "SHOT_B64_BEGIN $f"
+            Write-Host $b
+            Write-Host "SHOT_B64_END $f"
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
       - name: Upload release asset
         if: success()
         shell: pwsh
         run: |
           $tag = "v1.0.0-run$env:GITHUB_RUN_NUMBER"
-          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen will warn - click 'More info' -> 'Run anyway'." --latest
+          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen MAY warn on first run. Only run this file if you downloaded it from this release page; then click 'More info' -> 'Run anyway'." --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
