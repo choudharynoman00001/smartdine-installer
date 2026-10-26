@@ -19,25 +19,31 @@ jobs:
             $env:Path += ";C:\Program Files (x86)\NSIS"
           }
           makensis /VERSION
-      - name: Download portable Node runtime
+      - name: Download portable Node runtime and stage files
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $ver = "v22.14.0"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip" -OutFile node.zip
           Expand-Archive node.zip -DestinationPath .
-          New-Item -ItemType Directory -Force -Path stage\node | Out-Null
-          Copy-Item "node-$ver-win-x64\node.exe" stage\node\
-          Copy-Item -Recurse app stage\app
+          if (-not (Test-Path "node-$ver-win-x64\node.exe")) { throw "node runtime missing after expand" }
+          New-Item -ItemType Directory -Force -Path installer\stage\node | Out-Null
+          Copy-Item "node-$ver-win-x64\node.exe" installer\stage\node\
+          Copy-Item -Recurse app installer\stage\app
+          if (-not (Test-Path "installer\stage\app\server.mjs")) { throw "app staging failed" }
       - name: Build installer
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $env:Path += ";C:\Program Files (x86)\NSIS"
-          makensis installer\smartdine.nsi
-          Get-Item SmartDinePOS-Setup.exe | Select-Object Name, Length
+          Push-Location installer
+          makensis smartdine.nsi
+          Pop-Location
+          Get-Item installer\SmartDinePOS-Setup.exe | Select-Object Name, Length
       - name: Smoke test - silent install, launch, API checks
         shell: pwsh
         run: |
-          .\SmartDinePOS-Setup.exe /S
+          .\installer\SmartDinePOS-Setup.exe /S
           Start-Sleep 5
           $dir = "$env:LOCALAPPDATA\SmartDine"
           if (-not (Test-Path "$dir\node\node.exe")) { throw "install failed: node.exe missing" }
@@ -95,6 +101,6 @@ jobs:
         shell: pwsh
         run: |
           $tag = "v1.0.0-run$env:GITHUB_RUN_NUMBER"
-          gh release create $tag SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen will warn - click 'More info' -> 'Run anyway'." --latest
+          gh release create $tag installer\SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen will warn - click 'More info' -> 'Run anyway'." --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
