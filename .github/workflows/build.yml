@@ -127,7 +127,7 @@ jobs:
             for ($i = 0; $i -lt $b.Length; $i += 900) { Write-Host $b.Substring($i, [Math]::Min(900, $b.Length - $i)) }
             Write-Host "SHOT_B64_END $f"
           }
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
       - name: Upload release asset
         if: success()
         shell: pwsh
