@@ -1,0 +1,15 @@
+{
+  "name": "smartdine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SmartDine POS - QR ordering, KDS, cashier, inventory, expenses, reports. EN/UR RTL, offline-capable PWA.",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/api.test.mjs test/scc.test.mjs test/setup.test.mjs",
+    "build:web": "cd web && npm run build"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

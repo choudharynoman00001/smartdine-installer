@@ -1,0 +1,11 @@
+{
+  "name": "SmartDine POS",
+  "short_name": "SmartDine",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0f3d2e",
+  "icons": [
+    { "src": "/alpha-blue.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,100 @@
+name: Build Windows installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NSIS (ephemeral, with retry)
+        shell: pwsh
+        run: |
+          $ok = $false
+          for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+            try { choco install nsis -y --no-progress; $ok = $true } catch { Write-Host "choco attempt $i failed: $_"; Start-Sleep 10 }
+          }
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $env:Path += ";C:\Program Files (x86)\NSIS"
+          }
+          makensis /VERSION
+      - name: Download portable Node runtime
+        shell: pwsh
+        run: |
+          $ver = "v22.14.0"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip" -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath .
+          New-Item -ItemType Directory -Force -Path stage\node | Out-Null
+          Copy-Item "node-$ver-win-x64\node.exe" stage\node\
+          Copy-Item -Recurse app stage\app
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $env:Path += ";C:\Program Files (x86)\NSIS"
+          makensis installer\smartdine.nsi
+          Get-Item SmartDinePOS-Setup.exe | Select-Object Name, Length
+      - name: Smoke test - silent install, launch, API checks
+        shell: pwsh
+        run: |
+          .\SmartDinePOS-Setup.exe /S
+          Start-Sleep 5
+          $dir = "$env:LOCALAPPDATA\SmartDine"
+          if (-not (Test-Path "$dir\node\node.exe")) { throw "install failed: node.exe missing" }
+          if (-not (Test-Path "$dir\app\server.mjs")) { throw "install failed: app missing" }
+          # launch via the ACTUAL shipped launcher (catches broken shortcut/bat, not just node)
+          $env:SMARTDINE_NO_BROWSER = "1"
+          $proc = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
+          Start-Sleep 3
+          $node = Get-Process node -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $node) { throw "launcher did not start node" }
+          $env:SMARTDINE_PID = $node.Id
+          $up = $false
+          for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+            Start-Sleep 1
+            try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+          }
+          if (-not $up) { Get-Content "$dir\err.log" -ErrorAction SilentlyContinue; throw "server did not start" }
+          Write-Host "HEALTH OK"
+          # first-run setup: no default PINs exist; create the owner with a random PIN (never logged)
+          $setup = Invoke-RestMethod http://localhost:8080/api/setup
+          if (-not $setup.setup_required) { throw "fresh install should require setup" }
+          $pin1 = -join ((1..6) | ForEach-Object { Get-Random -Minimum 0 -Maximum 10 })
+          $login = Invoke-RestMethod -Method Post http://localhost:8080/api/setup -ContentType 'application/json' -Body (@{ name = "Smoke Owner"; pin = $pin1 } | ConvertTo-Json)
+          $hdr = @{ authorization = "Bearer $($login.token)" }
+          Write-Host "SETUP OK (owner created, PIN random+hidden)"
+          # PIN change requires current PIN; rotate once
+          $pin2 = -join ((1..6) | ForEach-Object { Get-Random -Minimum 0 -Maximum 10 })
+          Invoke-RestMethod -Method Post http://localhost:8080/api/auth/change-pin -Headers $hdr -ContentType 'application/json' -Body (@{ pin = $pin2; current_pin = $pin1 } | ConvertTo-Json) | Out-Null
+          Write-Host "PIN CHANGE OK"
+          # write: fresh install has an empty menu - create category + item, then an order
+          $cat = Invoke-RestMethod -Method Post http://localhost:8080/api/menu/categories -Headers $hdr -ContentType 'application/json' -Body '{"name_en":"Smoke","name_ur":"Smoke"}'
+          $mi = Invoke-RestMethod -Method Post http://localhost:8080/api/menu/items -Headers $hdr -ContentType 'application/json' -Body (@{ name_en = "Smoke Item"; category_id = $cat.category.id; price = 100 } | ConvertTo-Json)
+          $order = Invoke-RestMethod -Method Post http://localhost:8080/api/orders -Headers $hdr -ContentType 'application/json' -Body (@{ order_type = "takeaway"; items = @(@{ menu_item_id = $mi.item.id; qty = 1 }) } | ConvertTo-Json -Depth 4)
+          Write-Host "WRITE OK order=$($order.order.id)"
+          $order.order.id | Out-File "$dir\smoke-order.txt"
+          # stop + restart
+          Stop-Process -Id $env:SMARTDINE_PID -Force
+          Start-Sleep 2
+          $proc2 = Start-Process -PassThru -NoNewWindow "cmd.exe" -ArgumentList '/c', "`"$dir\SmartDine.bat`""
+          $up = $false
+          for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+            Start-Sleep 1
+            try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
+          }
+          if (-not $up) { throw "server did not restart" }
+          # readback: order survived restart
+          $login2 = Invoke-RestMethod -Method Post http://localhost:8080/api/auth/login -ContentType 'application/json' -Body (@{ pin = $pin2 } | ConvertTo-Json)
+          $orders = Invoke-RestMethod http://localhost:8080/api/orders -Headers @{ authorization = "Bearer $($login2.token)" }
+          $oid = Get-Content "$dir\smoke-order.txt"
+          if (-not ($orders.orders | Where-Object { $_.id -eq $oid })) { throw "readback failed: order lost after restart" }
+          Write-Host "RESTART+READBACK OK"
+          Stop-Process -Id $proc2.Id -Force
+      - name: Upload release asset
+        if: success()
+        shell: pwsh
+        run: |
+          $tag = "v1.0.0-run$env:GITHUB_RUN_NUMBER"
+          gh release create $tag SmartDinePOS-Setup.exe --title "SmartDine POS $tag" --notes "Automated build. Unsigned installer: Windows SmartScreen will warn - click 'More info' -> 'Run anyway'." --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
