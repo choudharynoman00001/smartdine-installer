@@ -1,0 +1,95 @@
+name: SmartDine finite Windows evidence only
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: smartdine-finite-evidence
+  cancel-in-progress: false
+jobs:
+  evidence:
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Extract exact reviewed evidence code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-evidence-code.tar.gz')
+          if($archives.Count -ne 1){throw 'exactly one reviewed evidence archive required'}
+          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '3e1b4c5bed7159dd814886247dcf41629d61dbe13759c6637cee14f4412b7362'){throw 'reviewed code archive hash mismatch'}
+          if(Test-Path evidence){throw 'unexpected evidence directory'}
+          tar -xzf $archives[0].Name
+          if($LASTEXITCODE -ne 0){throw 'reviewed code extraction failed'}
+      - name: Verify closed runtime and stage reviewed nested layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $ev=Join-Path $env:RUNNER_TEMP 'smartdine-ci-evidence'
+          New-Item -ItemType Directory -Force $ev | Out-Null
+          foreach($line in Get-Content evidence/SHA256SUMS){
+            if($line -notmatch '^([a-f0-9]{64})  (.+)$'){throw 'invalid file lock'}
+            if((Get-FileHash -LiteralPath $Matches[2] -Algorithm SHA256).Hash.ToLower() -ne $Matches[1]){throw 'prepared input file hash mismatch'}
+          }
+          foreach($file in Get-ChildItem evidence -Filter *.ps1 -Recurse){
+            $tokens=$null;$errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)|Out-Null
+            if($errors.Count){$errors|Format-List;throw 'PowerShell parse failed'}
+          }
+          $runtime='evidence/inputs/runtime.tar.gz'
+          if((Get-FileHash $runtime -Algorithm SHA256).Hash.ToLower() -ne 'e9fe2a154a1251d54e3e26d2d048e593c6adfd52b348a2b28075209b376d1003'){throw 'runtime hash mismatch'}
+          node --test evidence/packaging/stage.test.mjs
+          if($LASTEXITCODE -ne 0){throw 'stage tests failed'}
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/runtime-input" | Out-Null
+          tar -xzf $runtime -C "$env:RUNNER_TEMP/runtime-input"
+          if($LASTEXITCODE -ne 0){throw 'runtime extraction failed'}
+          node evidence/packaging/stage.mjs "$env:RUNNER_TEMP/runtime-input/smartdine-shifts-corrected" evidence/packaging/installer/stage
+          if($LASTEXITCODE -ne 0){throw 'manifest staging failed'}
+          Get-FileHash $runtime | Format-List | Out-File "$ev/inputs.txt"
+          Get-FileHash evidence/packaging/installer/* -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-File "$ev/script-hashes.txt"
+      - name: Download verified official Node and exact retained run5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $v='v22.14.0';$name="node-$v-win-x64.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/$v/$name" -OutFile "$env:RUNNER_TEMP/node.zip"
+          Invoke-WebRequest "https://nodejs.org/dist/$v/SHASUMS256.txt" -OutFile "$env:RUNNER_TEMP/SHASUMS256.txt"
+          $line=@(Get-Content "$env:RUNNER_TEMP/SHASUMS256.txt" | Where-Object {$_ -match ('  '+[regex]::Escape($name)+'$')})
+          if($line.Count -ne 1){throw 'official Node checksum not unique'}
+          $expected=$line[0].Split(' ')[0].ToLower()
+          if((Get-FileHash "$env:RUNNER_TEMP/node.zip" -Algorithm SHA256).Hash.ToLower() -ne $expected){throw 'official Node checksum mismatch'}
+          Expand-Archive "$env:RUNNER_TEMP/node.zip" "$env:RUNNER_TEMP/node-official"
+          New-Item -ItemType Directory evidence/packaging/installer/stage/node | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/node-official/node-$v-win-x64/node.exe" evidence/packaging/installer/stage/node/node.exe
+          & evidence/packaging/installer/stage/node/node.exe -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(':memory:');console.log(process.version,d.prepare('SELECT 1 AS ok').get());d.close()"
+          if($LASTEXITCODE -ne 0){throw 'official Windows Node SQLite boot failed'}
+          Invoke-WebRequest 'https://github.com/choudharynoman00001/smartdine-installer/releases/download/v1.0.0-run5/SmartDinePOS-Setup.exe' -OutFile "$env:RUNNER_TEMP/run5.exe"
+          if((Get-FileHash "$env:RUNNER_TEMP/run5.exe" -Algorithm SHA256).Hash.ToLower() -ne 'a705b77844e6b5f787fa9a6b8e991366bb42f2f75e04f879c0d8e01160996ab3'){throw 'legacy EXE hash mismatch'}
+          Copy-Item "$env:RUNNER_TEMP/SHASUMS256.txt" "$env:RUNNER_TEMP/smartdine-ci-evidence/"
+      - name: Compile NSIS exact scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          choco install nsis -y --no-progress --limit-output
+          if($LASTEXITCODE -ne 0){throw 'NSIS installation failed'}
+          choco list 2>&1 | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/build-tools.txt"
+          $env:Path+=';C:\Program Files (x86)\NSIS'
+          makensis /VERSION 2>&1 | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/nsis-version.txt"
+          Push-Location evidence/packaging/installer
+          try { makensis /V4 smartdine.nsi 2>&1 | Tee-Object "$env:RUNNER_TEMP/smartdine-ci-evidence/nsis.log"; if($LASTEXITCODE -ne 0){throw 'NSIS compile failed'} } finally { Pop-Location }
+      - name: Finite synthetic default and custom legacy preservation matrix
+        shell: pwsh
+        run: |
+          & evidence/ci/accept.ps1 -Candidate (Resolve-Path evidence/packaging/installer/SmartDinePOS-Setup.exe).Path -Legacy "$env:RUNNER_TEMP/run5.exe"
+      - name: Always save bounded non-secret diagnostics only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartdine-finite-windows-evidence
+          retention-days: 1
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/smartdine-ci-evidence/
