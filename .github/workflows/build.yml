@@ -11,13 +11,14 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Extract reviewed runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $archives = @(Get-ChildItem -File -Filter '*smartdine-runtime.zip')
+          $archives = @(Get-ChildItem -File -Filter '*smartdine-candidate7.zip')
           if ($archives.Count -ne 1) { throw 'exactly one reviewed runtime archive required' }
           Remove-Item app,installer -Recurse -Force
           Expand-Archive $archives[0].FullName -DestinationPath . -Force
@@ -122,10 +123,16 @@ jobs:
           $dir = "$env:LOCALAPPDATA\SmartDine"
           $owned = Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -like '*server.mjs*' }
           $owned | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-          .\installer\SmartDinePOS-Setup.exe /S
+          Write-Host 'CANDIDATE-INSTALL-START'
+          $install = Start-Process .\installer\SmartDinePOS-Setup.exe -ArgumentList '/S' -PassThru
+          if (-not $install.WaitForExit(60000)) { throw 'candidate silent installer timed out' }
+          Write-Host "CANDIDATE-INSTALL-EXIT $($install.ExitCode)"
+          if ($install.ExitCode -ne 0) { throw 'candidate install failed' }
           Start-Sleep -Seconds 3
           $env:SMARTDINE_NO_BROWSER = '1'
-          Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
+          Write-Host 'LAUNCHER-START (bounded cscript process-only wait)'
+          $launch = Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -PassThru
+          if (-not $launch.WaitForExit(60000)) { throw "shipped launcher timed out" }
           $pin = (Get-Content "$dir\smoke-pin.txt" -Raw).Trim()
           $login = Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/auth/login -ContentType 'application/json' -Body (@{pin=$pin} | ConvertTo-Json)
           $orders = Invoke-RestMethod http://127.0.0.1:8080/api/orders -Headers @{authorization="Bearer $($login.token)"}
@@ -143,7 +150,7 @@ jobs:
           $up = $false
           try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
           if (-not $up) {
-            $proc = Start-Process -PassThru "cscript.exe" -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
+            $proc = Start-Process -PassThru "cscript.exe" -ArgumentList "//nologo `"$dir\launcher.vbs`""
             for ($i = 0; $i -lt 30 -and -not $up; $i++) {
               Start-Sleep 1
               try { $h = Invoke-RestMethod http://localhost:8080/api/health; $up = $h.ok } catch {}
@@ -172,10 +179,16 @@ jobs:
           Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.ExecutablePath -eq "$dir\node\node.exe" -and $_.CommandLine -like '*server.mjs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           # Only the synthetic CI install, after upgrade evidence has been captured.
           Remove-Item $dir -Recurse -Force
-          .\installer\SmartDinePOS-Setup.exe /S
+          Write-Host 'CANDIDATE-INSTALL-START'
+          $install = Start-Process .\installer\SmartDinePOS-Setup.exe -ArgumentList '/S' -PassThru
+          if (-not $install.WaitForExit(60000)) { throw 'candidate silent installer timed out' }
+          Write-Host "CANDIDATE-INSTALL-EXIT $($install.ExitCode)"
+          if ($install.ExitCode -ne 0) { throw 'candidate install failed' }
           Start-Sleep -Seconds 3
           $env:SMARTDINE_NO_BROWSER='1'
-          Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -Wait
+          Write-Host 'LAUNCHER-START (bounded cscript process-only wait)'
+          $launch = Start-Process cscript.exe -ArgumentList "//nologo `"$dir\launcher.vbs`"" -PassThru
+          if (-not $launch.WaitForExit(60000)) { throw "shipped launcher timed out" }
           $s = Invoke-RestMethod http://127.0.0.1:8080/api/setup
           if (-not $s.setup_required) { throw 'fresh candidate unexpectedly configured' }
           $pin = -join ((1..8) | ForEach-Object { Get-Random -Minimum 0 -Maximum 10 })
