@@ -21,9 +21,9 @@ jobs:
           $ev=Join-Path $env:RUNNER_TEMP 'smartdine-ci-evidence'
           New-Item -ItemType Directory -Force $ev | Out-Null
           'BOOTSTRAP-START' | Set-Content (Join-Path $ev 'bootstrap.txt')
-          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-path-contract-code.tar.gz')
+          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-path-probe-fixed-code.tar.gz')
           if($archives.Count -ne 1){throw 'exactly one reviewed evidence archive required'}
-          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '027ad0906f496de1b24ea09194e364ca100ad8d2d404910935e254d190b5a1ff'){throw 'reviewed code archive hash mismatch'}
+          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne 'ed531910a74262ff2b811ab757f6d680b9cced21d4f4b5aa649849ff462e03d3'){throw 'reviewed code archive hash mismatch'}
           if(Test-Path evidence){throw 'unexpected evidence directory'}
           tar -xzf $archives[0].Name
           if($LASTEXITCODE -ne 0){throw 'reviewed code extraction failed'}
@@ -90,7 +90,7 @@ jobs:
             if($LASTEXITCODE -ne 0){throw 'NSIS argv test compile failed'}
             $probe=Start-Process .\quote-transport-test.exe -PassThru
             try {if(!$probe.WaitForExit(90000)){& taskkill.exe /PID $probe.Id /T /F|Out-Null;throw 'NSIS argv test deadline'};$probe.Refresh();if($probe.ExitCode -ne 0){throw 'NSIS argv literal transport failed'}}finally{$probe.Dispose()}
-            'PASS native NSIS to Windows PowerShell literal argv8cases' | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/argv-contract.txt"
+            'PASS native NSIS to Windows PowerShell effective INSTDIR argv8cases; see fixed status for raw/effective equality' | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/argv-contract.txt"
           } finally {Pop-Location}
           Push-Location evidence/packaging/installer
           try { makensis /V4 smartdine.nsi 2>&1 | Tee-Object "$env:RUNNER_TEMP/smartdine-ci-evidence/nsis.log"; if($LASTEXITCODE -ne 0){throw 'NSIS compile failed'} } finally { Pop-Location }
