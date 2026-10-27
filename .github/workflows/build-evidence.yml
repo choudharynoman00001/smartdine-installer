@@ -21,9 +21,9 @@ jobs:
           $ev=Join-Path $env:RUNNER_TEMP 'smartdine-ci-evidence'
           New-Item -ItemType Directory -Force $ev | Out-Null
           'BOOTSTRAP-START' | Set-Content (Join-Path $ev 'bootstrap.txt')
-          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-evidence-launch-diag-code.tar.gz')
+          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-node-contract-v2-code.tar.gz')
           if($archives.Count -ne 1){throw 'exactly one reviewed evidence archive required'}
-          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '3cf3ca8342cdb2cf358516d80a1b648ab647fe0f5c5935112fe00fe4614c9cc7'){throw 'reviewed code archive hash mismatch'}
+          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne 'c2bd00e13ff0097facdc9b443b6cb8cb662b81bbc28f838fda3a41dd8bc08e78'){throw 'reviewed code archive hash mismatch'}
           if(Test-Path evidence){throw 'unexpected evidence directory'}
           tar -xzf $archives[0].Name
           if($LASTEXITCODE -ne 0){throw 'reviewed code extraction failed'}
@@ -43,7 +43,7 @@ jobs:
             if($errors.Count){$errors|Format-List;throw 'PowerShell parse failed'}
           }
           $runtime='evidence/inputs/runtime.tar.gz'
-          if((Get-FileHash $runtime -Algorithm SHA256).Hash.ToLower() -ne 'e9fe2a154a1251d54e3e26d2d048e593c6adfd52b348a2b28075209b376d1003'){throw 'runtime hash mismatch'}
+          if((Get-FileHash $runtime -Algorithm SHA256).Hash.ToLower() -ne '351078a81bd4fe0f588794dd5ef9c025517c523c75814d3e4635d3e7d4d41348'){throw 'runtime hash mismatch'}
           node --test evidence/packaging/stage.test.mjs
           if($LASTEXITCODE -ne 0){throw 'stage tests failed'}
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/runtime-input" | Out-Null
@@ -57,7 +57,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $v='v22.14.0';$name="node-$v-win-x64.zip"
+          $v='v22.23.4';$name="node-$v-win-x64.zip"
           Invoke-WebRequest "https://nodejs.org/dist/$v/$name" -OutFile "$env:RUNNER_TEMP/node.zip"
           Invoke-WebRequest "https://nodejs.org/dist/$v/SHASUMS256.txt" -OutFile "$env:RUNNER_TEMP/SHASUMS256.txt"
           $line=@(Get-Content "$env:RUNNER_TEMP/SHASUMS256.txt" | Where-Object {$_ -match ('  '+[regex]::Escape($name)+'$')})
@@ -67,7 +67,7 @@ jobs:
           Expand-Archive "$env:RUNNER_TEMP/node.zip" "$env:RUNNER_TEMP/node-official"
           New-Item -ItemType Directory evidence/packaging/installer/stage/node | Out-Null
           Copy-Item "$env:RUNNER_TEMP/node-official/node-$v-win-x64/node.exe" evidence/packaging/installer/stage/node/node.exe
-          & evidence/packaging/installer/stage/node/node.exe -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(':memory:');console.log(process.version,d.prepare('SELECT 1 AS ok').get());d.close()"
+          & evidence/packaging/installer/stage/node/node.exe -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(':memory:');if(d.isTransaction!==false)throw Error('SQLite transaction state unavailable');d.exec('BEGIN');if(d.isTransaction!==true)throw Error('SQLite transaction state unavailable');d.exec('ROLLBACK');if(d.isTransaction!==false)throw Error('SQLite transaction state unavailable');console.log(process.version,'SQLITE-TRANSACTION-STATE-OK');d.close()"
           if($LASTEXITCODE -ne 0){throw 'official Windows Node SQLite boot failed'}
           Invoke-WebRequest 'https://github.com/choudharynoman00001/smartdine-installer/releases/download/v1.0.0-run5/SmartDinePOS-Setup.exe' -OutFile "$env:RUNNER_TEMP/run5.exe"
           if((Get-FileHash "$env:RUNNER_TEMP/run5.exe" -Algorithm SHA256).Hash.ToLower() -ne 'a705b77844e6b5f787fa9a6b8e991366bb42f2f75e04f879c0d8e01160996ab3'){throw 'legacy EXE hash mismatch'}
