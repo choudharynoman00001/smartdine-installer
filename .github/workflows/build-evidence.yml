@@ -21,9 +21,9 @@ jobs:
           $ev=Join-Path $env:RUNNER_TEMP 'smartdine-ci-evidence'
           New-Item -ItemType Directory -Force $ev | Out-Null
           'BOOTSTRAP-START' | Set-Content (Join-Path $ev 'bootstrap.txt')
-          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-node-contract-v2-code.tar.gz')
+          $archives=@(Get-ChildItem -File -Filter '*smartdine-windows-path-contract-code.tar.gz')
           if($archives.Count -ne 1){throw 'exactly one reviewed evidence archive required'}
-          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne 'c2bd00e13ff0097facdc9b443b6cb8cb662b81bbc28f838fda3a41dd8bc08e78'){throw 'reviewed code archive hash mismatch'}
+          if((Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLower() -ne '027ad0906f496de1b24ea09194e364ca100ad8d2d404910935e254d190b5a1ff'){throw 'reviewed code archive hash mismatch'}
           if(Test-Path evidence){throw 'unexpected evidence directory'}
           tar -xzf $archives[0].Name
           if($LASTEXITCODE -ne 0){throw 'reviewed code extraction failed'}
@@ -42,6 +42,9 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)|Out-Null
             if($errors.Count){$errors|Format-List;throw 'PowerShell parse failed'}
           }
+          & evidence/ci/path-transport.ps1
+          node --test evidence/ci/path-transport.test.mjs
+          if($LASTEXITCODE -ne 0){throw 'source literal argv contract failed'}
           $runtime='evidence/inputs/runtime.tar.gz'
           if((Get-FileHash $runtime -Algorithm SHA256).Hash.ToLower() -ne '351078a81bd4fe0f588794dd5ef9c025517c523c75814d3e4635d3e7d4d41348'){throw 'runtime hash mismatch'}
           node --test evidence/packaging/stage.test.mjs
@@ -81,6 +84,14 @@ jobs:
           choco list 2>&1 | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/build-tools.txt"
           $env:Path+=';C:\Program Files (x86)\NSIS'
           makensis /VERSION 2>&1 | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/nsis-version.txt"
+          Push-Location evidence/packaging/installer
+          try {
+            makensis /V4 quote-transport-test.nsi
+            if($LASTEXITCODE -ne 0){throw 'NSIS argv test compile failed'}
+            $probe=Start-Process .\quote-transport-test.exe -PassThru
+            try {if(!$probe.WaitForExit(90000)){& taskkill.exe /PID $probe.Id /T /F|Out-Null;throw 'NSIS argv test deadline'};$probe.Refresh();if($probe.ExitCode -ne 0){throw 'NSIS argv literal transport failed'}}finally{$probe.Dispose()}
+            'PASS native NSIS to Windows PowerShell literal argv8cases' | Out-File "$env:RUNNER_TEMP/smartdine-ci-evidence/argv-contract.txt"
+          } finally {Pop-Location}
           Push-Location evidence/packaging/installer
           try { makensis /V4 smartdine.nsi 2>&1 | Tee-Object "$env:RUNNER_TEMP/smartdine-ci-evidence/nsis.log"; if($LASTEXITCODE -ne 0){throw 'NSIS compile failed'} } finally { Pop-Location }
       - name: Finite synthetic default and custom legacy preservation matrix
