@@ -1,0 +1,82 @@
+name: SmartDine PG one finite native proof
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: smartdine-pg-finite-native-proof
+  cancel-in-progress: false
+jobs:
+  proof:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'choudharynoman00001/smartdine-installer'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify pinned compact proof transport and closed extraction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='1-smartdine-pg-proof-public-inputs-v2.zip'
+          if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '6feb2ed6ba5b3c86550e84139d119193bfb2f73ad8e7b43b26bcd802dfc77965'){throw 'proof ZIP pin mismatch'}
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          function ReadBytes($e){$s=$e.Open();$m=New-Object IO.MemoryStream;try{$s.CopyTo($m);return ,$m.ToArray()}finally{$s.Dispose();$m.Dispose()}}
+          function Sha($b){$h=[Security.Cryptography.SHA256]::Create();try{return ([BitConverter]::ToString($h.ComputeHash($b))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+          $dst=Join-Path $env:RUNNER_TEMP 'sd-pg-proof-source'
+          if(Test-Path -LiteralPath $dst){throw 'new source directory required'}
+          try{
+            if($z.Entries.Count -ne 74){throw 'closed ZIP count mismatch'}
+            $entries=@{}
+            foreach($e in $z.Entries){
+              $n=$e.FullName
+              if($n -notmatch '^(app|windows|proof|\.github)/[A-Za-z0-9_./-]+$' -or $n -match '(^|/)\.\.?(/|$)' -or $n.Contains('\') -or $n.EndsWith('/') -or $entries.ContainsKey($n)){throw 'archive path/alias refused'}
+              $mode=($e.ExternalAttributes -shr 16) -band 61440
+              if($mode -ne 0 -and $mode -ne 32768){throw 'archive link/nonregular refused'}
+              if($e.Length -gt 2000000){throw 'entry size limit'}
+              $entries[$n]=$e
+            }
+            $manifestBytes=ReadBytes $entries['proof/minimal-input-manifest.json']
+            if((Sha $manifestBytes) -ne 'ea98644831048b8947d1b6a50ec634012c9369e921185b22e04ac1122ae619ad'){throw 'manifest independent pin mismatch'}
+            $m=[Text.Encoding]::UTF8.GetString($manifestBytes)|ConvertFrom-Json
+            if($m.files.Count -ne 73){throw 'closed input count mismatch'}
+            $seen=@{}
+            foreach($f in $m.files){
+              if($seen.ContainsKey($f.path) -or !$entries.ContainsKey($f.path)){throw 'manifest alias/missing input'}
+              $seen[$f.path]=$true;$b=ReadBytes $entries[$f.path]
+              if($b.Length -ne $f.bytes -or (Sha $b) -ne $f.sha256){throw 'input hash mismatch'}
+            }
+            foreach($n in $entries.Keys){if($n -ne 'proof/minimal-input-manifest.json' -and !$seen.ContainsKey($n)){throw 'unlisted ZIP input'}}
+            New-Item -ItemType Directory $dst|Out-Null
+            foreach($f in $m.files){$out=Join-Path $dst $f.path;New-Item -ItemType Directory -Force ([IO.Path]::GetDirectoryName($out))|Out-Null;[IO.File]::WriteAllBytes($out,(ReadBytes $entries[$f.path]))}
+          }finally{$z.Dispose()}
+          # Nested workflow is hashed inert input, never installed into the repository or executed.
+      - name: Download pinned tools and build only on ephemeral runner
+        shell: pwsh
+        run: |
+          $s=Join-Path $env:RUNNER_TEMP 'sd-pg-proof-source'
+          & "$s/proof/prepare-runner.ps1" -Source $s -Work (Join-Path $env:RUNNER_TEMP 'sd-pg-proof-work')
+          if($LASTEXITCODE -ne 0){throw 'runner preparation failed'}
+          & "$s/proof/compile-runner.ps1" -Source $s -Stage (Join-Path $env:RUNNER_TEMP 'sd-pg-proof-work/stage') -Work (Join-Path $env:RUNNER_TEMP 'sd-pg-proof-work')
+          if($LASTEXITCODE -ne 0){throw 'runner compilation failed'}
+      - name: Finite synthetic native matrix
+        shell: pwsh
+        run: |
+          $w=Join-Path $env:RUNNER_TEMP 'sd-pg-proof-work'
+          $s=Join-Path $env:RUNNER_TEMP 'sd-pg-proof-source'
+          & "$s/proof/accept-source.ps1" -Stage "$w/stage" -Evidence "$w/evidence" -Installer "$w/SmartDinePG-Setup.exe"
+      - name: Emit only sanitized summary
+        if: always()
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'sd-pg-proof-work/evidence/evidence-summary.json'
+          if(Test-Path -LiteralPath $p){
+            $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json
+            if($m.format -ne 'smartdine-pg-proof-v1'){throw 'unknown evidence format'}
+            $safe=@{format=$m.format;nativeCompleted=$m.nativeCompleted;failingPhase=$m.failingPhase;pgEpochDeltaSeconds=$m.pgEpochDeltaSeconds;results=@($m.results|ForEach-Object{if($_.phase -notmatch '^[A-Za-z0-9-]+$' -or $_.status -notin @('PASS','FAIL','NOT_PROVED')){throw 'unsafe result'};@{phase=$_.phase;status=$_.status}})}
+            $safe|ConvertTo-Json -Depth 5
+          }else{Write-Output '{"format":"smartdine-pg-proof-v1","nativeCompleted":false,"failingPhase":"before-matrix"}'}
+          # No artifact/cache/release/deploy action. No upload of vendor/setup/private state.
